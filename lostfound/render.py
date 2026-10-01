@@ -329,6 +329,7 @@ def staff_item_detail(
     merge_candidates: list[Any] | None = None,
     merges: list[Any] | None = None,
     merge_info: Any = None,
+    revocations: list[Any] | None = None,
 ) -> str:
     actions = ""
     if item["status"] == "kept":
@@ -362,6 +363,10 @@ def staff_item_detail(
         else ""
     )
     merge_hist = _merges_card(merges or [])
+    revoke_card = (
+        _revoke_panel(item["id"], csrf_token) if item["status"] == "returned" else ""
+    )
+    revoke_hist = _revocations_card(revocations or [])
     body = f"""
     <div class="card">
       <h1>物品 #{item['id']} {item_badge(item['status'])}</h1>
@@ -374,11 +379,12 @@ def staff_item_detail(
       <div class="row">{actions}<a class="btn secondary" href="/staff">返回登记台</a></div>
     </div>
     {merge_card}
+    {revoke_card}
     <div class="card">
       <h1>认领申请（含私密答案与联系方式，仅工作人员可见）</h1>
       <table><thead><tr><th>申请</th><th>状态</th><th>辨认答案</th><th>联系方式</th><th>提交时间</th></tr></thead>
       <tbody>{rows}</tbody></table>
-    </div>{corr_html}{merge_hist}"""
+    </div>{corr_html}{revoke_hist}{merge_hist}"""
     return page(f"物品 #{item['id']}", body, staff=True, flash=flash)
 
 
@@ -472,6 +478,48 @@ def _merges_card(merges: list[Any]) -> str:
       <h1>物品合并记录（仅工作人员可见）</h1>
       <table><thead><tr><th>保留物品</th><th>并入物品（原记录）</th>
       <th>合并理由</th><th>合并时间</th></tr></thead>
+      <tbody>{rows}</tbody></table>
+    </div>"""
+
+
+def _revoke_panel(item_id: int, csrf_token: str) -> str:
+    """已交还物品：核码后发现物品实际仍在馆内时，工作人员可撤销本次交还登记。"""
+    return f"""
+    <div class="card">
+      <h1>撤销交还登记</h1>
+      <form method="post" action="/staff/items/{item_id}/revoke-handover">
+        {csrf_field(csrf_token)}
+        <label for="reason">撤销原因（必填，将随撤销记录保存供追溯）</label>
+        <textarea id="reason" name="reason" required maxlength="2000"
+          placeholder="例如：核码登记后发现物品实际仍在馆内，本次交还登记为误操作"></textarea>
+        <div class="row"><button class="btn danger" type="submit"
+          onclick="return confirm('撤销后物品恢复为保管中，原获选人保持获选，已核销码永久失效，并将按现有有效期规则签发新的一次性交还码。确定？')">
+          撤销本次交还登记</button></div>
+      </form>
+      <p class="muted">仅物品仍为已交还、且本次核销记录属于当前获选申请且尚未撤销时允许；
+      撤销为原子操作：物品恢复保管中、申请归属与获选状态不变、已核销码永久失效、签发新码。
+      访客凭查询凭证只看到本人最新状态与新码，不显示撤销原因。</p>
+    </div>"""
+
+
+def _revocations_card(revocations: list[Any]) -> str:
+    if not revocations:
+        return ""
+    rows = "".join(
+        "<tr>"
+        f'<td><a href="/staff/claims/{r["claim_id"]}">#{r["claim_id"]}</a></td>'
+        f'<td>{e(_short(r["claim_answer"]))} / {e(_short(r["claim_contact"]))}</td>'
+        f"<td>{fmt_time(r['consumed_at'])}</td>"
+        f"<td>{fmt_time(r['created_at'])}</td>"
+        f'<td>{e(r["reason"])}</td>'
+        "</tr>"
+        for r in revocations
+    )
+    return f"""
+    <div class="card">
+      <h1>交还撤销记录（仅工作人员可见）</h1>
+      <table><thead><tr><th>获选申请</th><th>答案 / 联系方式</th>
+      <th>原核销时间</th><th>撤销时间</th><th>撤销原因</th></tr></thead>
       <tbody>{rows}</tbody></table>
     </div>"""
 

@@ -327,6 +327,7 @@ class App:
             )
             claims = repository.list_claims_for_item(self.conn(), view_item_id)
             corrections = repository.list_corrections_for_item(self.conn(), view_item_id)
+            revocations = repository.list_revocations_for_item(self.conn(), view_item_id)
             merges = repository.list_merges_for_item(self.conn(), iid)
             merge_info = None
             merge_candidates = []
@@ -340,11 +341,15 @@ class App:
                     merge_candidates=merge_candidates,
                     merges=merges,
                     merge_info=merge_info,
+                    revocations=revocations,
                 )
             )
 
         if m == "POST" and (parts := _match("/staff/items/{id}/merge", p)):
             return self.merge_items(req, int(parts[0]))
+
+        if m == "POST" and (parts := _match("/staff/items/{id}/revoke-handover", p)):
+            return self.revoke_handover(req, int(parts[0]))
 
         if m == "POST" and (parts := _match("/staff/items/{id}/remove", p)):
             if not self.check_csrf(req):
@@ -454,6 +459,24 @@ class App:
                    f"保留申请 #{winner} 的获选资格与交还码，其余待核对申请已标记未获选；"
                    "并入记录已从公开列表移除且不能恢复。")
         return Response.redirect(f"/staff/items/{keep_item_id}", ("ok", msg))
+
+    def revoke_handover(self, req: Request, item_id: int) -> Response:
+        if not self.check_csrf(req):
+            return self.bad_csrf()
+        reason = req.form().get("reason", "").strip()
+        if not reason:
+            return Response.redirect(f"/staff/items/{item_id}", ("err", "撤销原因不能为空。"))
+        if len(reason) > 2000:
+            return Response.redirect(f"/staff/items/{item_id}", ("err", "撤销原因超出长度限制。"))
+        try:
+            repository.revoke_handover(self.conn(), item_id, reason, self.code_ttl, self.secret)
+        except ValueError as exc:  # 状态不满足 / 重复撤销 / 并发变化：不改动任何数据
+            return Response.redirect(f"/staff/items/{item_id}", ("err", str(exc)))
+        return Response.redirect(
+            f"/staff/items/{item_id}",
+            ("ok", "已撤销本次交还登记：物品恢复为保管中，原获选人保持获选，"
+                   "已核销码永久失效，新一次性交还码已签发。"),
+        )
 
     def staff_claim(self, req: Request, claim_id: int, flash: Flash | None) -> Response:
         claim = repository.get_claim_with_context(self.conn(), claim_id)

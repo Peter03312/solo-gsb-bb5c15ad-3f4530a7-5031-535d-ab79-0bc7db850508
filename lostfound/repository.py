@@ -408,6 +408,11 @@ def merge_items(
             "UPDATE corrections SET item_id = ? WHERE item_id = ?",
             (keep_item_id, merged_item_id),
         )
+        # 并入物品的交还撤销记录一并归到保留物品（保持可追溯）
+        conn.execute(
+            "UPDATE handover_revocations SET item_id = ? WHERE item_id = ?",
+            (keep_item_id, merged_item_id),
+        )
         # 合计仅一份获选：其他待核对申请标记未获选（与选定逻辑一致）
         winner_id = None
         if keep_selected or victim_selected:
@@ -476,6 +481,102 @@ def list_merges_for_item(conn: sqlite3.Connection, item_id: int) -> list[sqlite3
         ORDER BY m.id ASC
         """,
         (item_id, item_id),
+    ).fetchall()
+
+
+# ----------------------------------------------------------------- 交还撤销
+
+def revoke_handover(
+    conn: sqlite3.Connection,
+    item_id: int,
+    reason: str,
+    code_ttl_seconds: int,
+    key: bytes,
+) -> str:
+    """撤销一次交还登记：物品恢复保管中，并为当前获选人签发新的一次性交还码。
+
+    仅在下列条件全部满足时执行，任一不满足均拒绝且不改动任何数据：
+      - 物品当前为 returned（已交还）；
+      - 存在属于当前获选申请、已核销且尚未被撤销的本次核销记录；
+      - 撤销原因非空（由调用方负责校验，这里再次防御）。
+
+    单次 IMMEDIATE 事务内原子完成：
+      - 物品恢复 kept，申请归属与获选状态保持不变；
+      - 已核销码保持已核销（永久失效，绝不恢复可用）；
+      - 按现有有效期规则为该获选人签发一枚新的一次性交还码；
+      - 保存撤销记录（物品、申请、被撤销的码、原核销时间、原因、撤销时间）。
+    与核码、另一撤销等并发导致条件变化时，条件 UPDATE 保证只有一次符合
+    状态的撤销生效，其余请求拒绝且不改动数据。
+    返回新码明文。
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("撤销原因不能为空")
+
+    ts = now_iso()
+    expires = (
+        datetime.now(timezone.utc) + timedelta(seconds=code_ttl_seconds)
+    ).replace(microsecond=0).isoformat()
+    code = security.new_handover_code()
+    with immediate_tx(conn):
+        item = conn.execute(
+            "SELECT id, status FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if item is None:
+            raise LookupError("物品不存在")
+        if item["status"] != "returned":
+            raise ValueError("仅已交还的物品可以撤销交还登记")
+        claim = conn.execute(
+            "SELECT id FROM claims WHERE item_id = ? AND status = 'selected'",
+            (item_id,),
+        ).fetchone()
+        if claim is None:
+            raise ValueError("未找到该物品的当前获选申请，核销记录不匹配，不能撤销")
+        consumed = conn.execute(
+            "SELECT * FROM handover_codes WHERE claim_id = ? AND consumed_at IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (claim["id"],),
+        ).fetchone()
+        if consumed is None:
+            raise ValueError("未找到属于当前获选申请的本次核销记录，不能撤销")
+        if conn.execute(
+            "SELECT 1 FROM handover_revocations WHERE code_id = ?",
+            (consumed["id"],),
+        ).fetchone() is not None:
+            raise ValueError("该次交还登记已被撤销，不能重复撤销")
+
+        cur = conn.execute(
+            "UPDATE items SET status = 'kept', updated_at = ?"
+            " WHERE id = ? AND status = 'returned'",
+            (ts, item_id),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("物品状态已变化（可能已被并发处理），撤销未执行")
+        conn.execute(
+            "INSERT INTO handover_revocations"
+            " (item_id, claim_id, code_id, consumed_at, reason, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (item_id, claim["id"], consumed["id"], consumed["consumed_at"], reason, ts),
+        )
+        conn.execute(
+            "INSERT INTO handover_codes (claim_id, code_hash, code_enc, issued_at, expires_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (claim["id"], security.sha256_hex(code), security.encrypt_field(key, code), ts, expires),
+        )
+    return code
+
+
+def list_revocations_for_item(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
+    """物品的交还撤销记录（工作人员追溯）：原核销时间、撤销时间与原因。"""
+    return conn.execute(
+        """
+        SELECT r.*, c.answer AS claim_answer, c.contact AS claim_contact
+        FROM handover_revocations r
+        JOIN claims c ON c.id = r.claim_id
+        WHERE r.item_id = ?
+        ORDER BY r.id ASC
+        """,
+        (item_id,),
     ).fetchall()
 
 
