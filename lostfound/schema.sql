@@ -69,3 +69,19 @@ CREATE TABLE IF NOT EXISTS merges (
 );
 CREATE INDEX IF NOT EXISTS idx_merges_keep ON merges(keep_item_id);
 CREATE INDEX IF NOT EXISTS idx_merges_merged ON merges(merged_item_id);
+
+-- 交还登记撤销记录：工作人员核码后发现物品实际仍在馆内时，可在已交还物品详情页
+-- 填写必填原因撤销该次交还登记。每条记录对应一次「已核销且尚未撤销」的核销记录
+-- （handover_codes 行）；撤销在单个事务内把物品恢复为保管中（申请归属与获选状态
+-- 不变）、已核销码永久失效，并按现有有效期规则向当前获选人签发一枚新交还码。
+-- code_id 上的唯一约束保证一枚已核销码至多被撤销一次。
+CREATE TABLE IF NOT EXISTS return_revocations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id      INTEGER NOT NULL REFERENCES items(id),
+    claim_id     INTEGER NOT NULL REFERENCES claims(id),       -- 当前获选申请（撤销后归属不变）
+    code_id      INTEGER NOT NULL UNIQUE REFERENCES handover_codes(id),  -- 被撤销的本次核销记录
+    reason       TEXT    NOT NULL,
+    consumed_at  TEXT    NOT NULL,                             -- 原核销时间（快照）
+    created_at   TEXT    NOT NULL                              -- 撤销时间
+);
+CREATE INDEX IF NOT EXISTS idx_revocations_item ON return_revocations(item_id);

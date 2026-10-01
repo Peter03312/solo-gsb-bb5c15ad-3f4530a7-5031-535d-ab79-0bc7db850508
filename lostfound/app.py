@@ -328,18 +328,25 @@ class App:
             claims = repository.list_claims_for_item(self.conn(), view_item_id)
             corrections = repository.list_corrections_for_item(self.conn(), view_item_id)
             merges = repository.list_merges_for_item(self.conn(), iid)
+            revocations = repository.list_return_revocations_for_item(self.conn(), view_item_id)
             merge_info = None
             merge_candidates = []
+            return_info = None
             if item["status"] == "merged":
                 merge_info = repository.get_merge_for_merged(self.conn(), iid)
             elif item["status"] == "kept":
                 merge_candidates = repository.list_mergeable_items(self.conn(), iid)
+            elif item["status"] == "returned":
+                # 已交还：展示「本次核销记录」及撤销表单（已撤销后无待撤销记录）
+                return_info = repository.get_return_for_item(self.conn(), iid)
             return self.html(
                 render.staff_item_detail(
                     item, claims, self.csrf_token(req), flash, corrections,
                     merge_candidates=merge_candidates,
                     merges=merges,
                     merge_info=merge_info,
+                    return_info=return_info,
+                    revocations=revocations,
                 )
             )
 
@@ -359,6 +366,9 @@ class App:
             iid = int(parts[0])
             repository.restore_item(self.conn(), iid)
             return Response.redirect(f"/staff/items/{iid}", ("ok", "物品已恢复为保管中。"))
+
+        if m == "POST" and (parts := _match("/staff/items/{id}/revoke-return", p)):
+            return self.revoke_return(req, int(parts[0]))
 
         if m == "GET" and (parts := _match("/staff/claims/{id}", p)):
             return self.staff_claim(req, int(parts[0]), flash)
@@ -454,6 +464,30 @@ class App:
                    f"保留申请 #{winner} 的获选资格与交还码，其余待核对申请已标记未获选；"
                    "并入记录已从公开列表移除且不能恢复。")
         return Response.redirect(f"/staff/items/{keep_item_id}", ("ok", msg))
+
+    def revoke_return(self, req: Request, item_id: int) -> Response:
+        if not self.check_csrf(req):
+            return self.bad_csrf()
+        form = req.form()
+        raw_code_id = form.get("code_id", "").strip()
+        reason = form.get("reason", "").strip()
+        if not raw_code_id.isdigit():
+            return Response.redirect(f"/staff/items/{item_id}", ("err", "核销记录无效，无法撤销。"))
+        if not reason:
+            return Response.redirect(f"/staff/items/{item_id}", ("err", "撤销原因不能为空。"))
+        if len(reason) > 2000:
+            return Response.redirect(f"/staff/items/{item_id}", ("err", "撤销原因超出长度限制。"))
+        try:
+            result = repository.revoke_return(
+                self.conn(), item_id, int(raw_code_id), reason, self.code_ttl, self.secret
+            )
+        except (ValueError, LookupError) as exc:  # 条件变化 / 记录不匹配 / 重复请求：拒绝且不改数据
+            return Response.redirect(f"/staff/items/{item_id}", ("err", str(exc)))
+        return Response.redirect(
+            f"/staff/items/{item_id}",
+            ("ok", f"已撤销本次交还登记：物品 #{item_id} 恢复为保管中，"
+                   "原已核销码永久失效，新的一次性交还码已签发给当前获选人。"),
+        )
 
     def staff_claim(self, req: Request, claim_id: int, flash: Flash | None) -> Response:
         claim = repository.get_claim_with_context(self.conn(), claim_id)
